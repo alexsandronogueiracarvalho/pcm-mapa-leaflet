@@ -1,5 +1,5 @@
 import { demoRecords, parseCodigoSAP, parseCoordinates, parseDecimal, resolveLocation } from './records.js'
-import { buildCanvasReturnLink, parseCanvasWebLink } from './power-apps-link.js'
+import { buildCanvasReturnLink, createCanvasReturnAction, parseAdministrationSapContext, parseCanvasWebLink } from './power-apps-link.js'
 
 const defaultCenter = [0, 0]
 const initialZoom = 2
@@ -13,6 +13,7 @@ const descricao = document.querySelector('#descricao')
 const mapStatus = document.querySelector('#map-status')
 const parameters = new URLSearchParams(location.search)
 const canvasWebLink = parseCanvasWebLink(parameters.get('canvasUrl'))
+const administrationSapContext = parseAdministrationSapContext(parameters)
 const requestedCode = parseCodigoSAP(parameters.get('codigoSAP'))
 const requestedCoordinates = parseCoordinates(parameters.get('lat'), parameters.get('lon'))
 const zoom = parseDecimal(parameters.get('zoom'))
@@ -62,18 +63,27 @@ function initMap(leaflet) {
   const json = document.querySelector('#selection-json')
   const confirm = document.querySelector('#confirm-location')
   const returnStatus = document.querySelector('#return-status')
+  const consumedReturnKey = administrationSapContext?.retornoId
+    ? `pcm-leaflet-return:${administrationSapContext.retornoId}` : null
+  function wasReturnConsumed() {
+    try { return Boolean(consumedReturnKey && sessionStorage.getItem(consumedReturnKey) === 'used') } catch { return false }
+  }
+  function markReturnConsumed() {
+    try { if (consumedReturnKey) sessionStorage.setItem(consumedReturnKey, 'used') } catch { /* The in-memory guard remains active. */ }
+  }
   const initialPoint = requestedCoordinates && {
     ...requestedCoordinates, origemCoordenada: 'url', codigoLocalReferencia: null,
   }
   let selectedCode
   let reference
   let selection
+  let returnUsed = wasReturnConsumed()
   let referenceMarker
   let selectionMarker
   let lookupVersion = 0
 
   function canvasReturnLink() {
-    return buildCanvasReturnLink(canvasWebLink, parseCodigoSAP(codigo.value), selection, map.getZoom())
+    return buildCanvasReturnLink(canvasWebLink, parseCodigoSAP(codigo.value), selection, map.getZoom(), administrationSapContext)
   }
 
   function drawMarker(marker, point, options) {
@@ -91,10 +101,14 @@ function initMap(leaflet) {
     longitude.value = point ? point.longitude.toFixed(6) : ''
     copy.disabled = !point
     clear.disabled = !selection
-    confirm.disabled = !canvasReturnLink()
+    confirm.disabled = returnUsed || !canvasReturnLink()
     returnStatus.textContent = !canvasWebLink
       ? 'Informe o Link da Web do Canvas de teste no parâmetro canvasUrl.'
-      : confirm.disabled ? 'Selecione um novo ponto para confirmar.' : 'A confirmação abre o Canvas de teste nesta aba.'
+      : returnUsed ? 'Este retorno já foi utilizado. Reabra o mapa pelo Canvas para iniciar outra seleção.'
+        : confirm.disabled ? 'Selecione um novo ponto para confirmar.'
+          : administrationSapContext
+            ? 'A confirmação retorna a seleção manual à localização SAP desta operação.'
+            : 'A confirmação abre o Canvas de teste nesta aba.'
     pointOrigin.hidden = !selection
     pointOrigin.dataset.origin = origin
     pointOrigin.textContent = selection?.origemCoordenada === 'url'
@@ -130,7 +144,7 @@ function initMap(leaflet) {
   async function loadLocation(recenter = false) {
     const code = parseCodigoSAP(codigo.value)
     const version = ++lookupVersion
-    if (selectedCode !== code && selection?.origemCoordenada === 'url') selection = null
+    if (selectedCode !== code && (administrationSapContext || selection?.origemCoordenada === 'url')) selection = null
     selectedCode = code
     reference = null
     renderPoints()
@@ -150,7 +164,7 @@ function initMap(leaflet) {
 
   function capture(position) {
     const point = position.wrap()
-    selection = { latitude: point.lat, longitude: point.lng, origemCoordenada: 'manual', codigoLocalReferencia: null }
+    selection = { latitude: point.lat, longitude: point.lng, origemCoordenada: 'manual', codigoLocalReferencia: null, codigoSAPAtSelection: parseCodigoSAP(codigo.value) }
     renderPoints()
     captureStatus.textContent = `Latitude ${latitude.value}, longitude ${longitude.value}.`
   }
@@ -165,10 +179,19 @@ function initMap(leaflet) {
   map.on('zoomend', renderOutput)
   map.on('click', ({ latlng }) => capture(latlng))
   captureCenter.addEventListener('click', () => capture(map.getCenter()))
-  confirm.addEventListener('click', () => {
-    const link = canvasReturnLink()
-    if (link) location.assign(link)
-  })
+  if (administrationSapContext) {
+    const returnToCanvas = createCanvasReturnAction(
+      () => canvasReturnLink(),
+      link => { returnUsed = true; confirm.disabled = true; location.assign(link) },
+      { isUsed: wasReturnConsumed, markUsed: markReturnConsumed },
+    )
+    confirm.addEventListener('click', () => { returnToCanvas() })
+  } else {
+    confirm.addEventListener('click', () => {
+      const link = canvasReturnLink()
+      if (link) location.assign(link)
+    })
+  }
   resetView.addEventListener('click', () => map.setView(defaultCenter, initialZoom))
   clear.addEventListener('click', () => {
     selection = null
